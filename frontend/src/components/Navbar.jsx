@@ -29,7 +29,7 @@ export default function Navbar() {
           History
         </button>
         <button onClick={() => navigate('/settings')} className={linkClass('/settings')}>
-          Settings
+          Architecture
         </button>
       </div>
     </nav>

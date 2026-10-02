@@ -1,28 +1,43 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { investigateQuery } from '../services/api'
+import { exampleQueries } from '../data/exampleQueries'
+import SearchLoading from '../components/SearchLoading'
 
 export default function SemanticSearch() {
   const navigate = useNavigate()
-  const [query, setQuery] = useState('')
+  const location = useLocation()
+  const [query, setQuery] = useState(location.state?.query || '')
   const [error, setError] = useState('')
+  const [isSearching, setIsSearching] = useState(false)
+  const [currentStep, setCurrentStep] = useState(0)
 
-  const exampleQueries = [
-    "Find areas where new construction appeared near Mumbai coastline between January 2024 and January 2026",
-    "Detect deforestation in the Amazon basin over the last 2 years",
-    "Show new mining activity near river systems in Jharkhand",
-  ]
-
-  const handleSubmit = async () => {
-    if (query.trim().length === 0) return
+  const handleSubmit = async (event) => {
+    event?.preventDefault()
+    if (query.trim().length === 0 || isSearching) return
     setError('')
+    setIsSearching(true)
+    setCurrentStep(0)
+    const startedAt = Date.now()
+    const progressTimer = setInterval(() => {
+      setCurrentStep((step) => Math.min(step + 1, 6))
+    }, 900)
 
     try {
       const data = await investigateQuery(query)
+      const remainingTime = Math.max(0, 6300 - (Date.now() - startedAt))
+      if (remainingTime) await new Promise((resolve) => setTimeout(resolve, remainingTime))
+      clearInterval(progressTimer)
       navigate('/results', { state: { query, backendResults: data.results } })
     } catch (err) {
+      clearInterval(progressTimer)
+      setIsSearching(false)
       setError("Could not connect to the backend. Make sure it's running.")
     }
+  }
+
+  if (isSearching) {
+    return <SearchLoading query={query} currentStep={currentStep} />
   }
 
   const handleKeyDown = (e) => {
@@ -39,37 +54,37 @@ export default function SemanticSearch() {
 
       <div className="max-w-2xl w-full text-center relative z-10">
         <p className="text-cyan-600 text-sm font-semibold tracking-widest uppercase mb-3">
-          Semantic Search
+          Text Search
         </p>
         <h1 className="text-3xl md:text-4xl font-extrabold mb-4">
-          What do you want to investigate?
+          What scene do you want to find?
         </h1>
         <p className="text-gray-500 mb-4">
-          Describe the location, timeframe, and type of change you're looking for.
+          Describe the kind of scene you want to find in the local image archive.
         </p>
         <p className="text-xs text-gray-400 mb-10">
-          This prototype matches against a small demo set of sample locations using an offline semantic model.
+          Text similarity searches captions for 500 RSICD images. This archive has no verified coordinates or capture dates.
         </p>
 
-        <div className="bg-white rounded-2xl shadow-lg border border-gray-200 p-2 flex items-end gap-2">
+          <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-lg border border-gray-200 p-2 flex items-end gap-2">
           <textarea
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="e.g. Find areas where new construction appeared near this region between January 2024 and January 2026"
+            placeholder="e.g. Find airport scenes with aircraft parked near runways and buildings"
             rows={3}
             className="flex-1 resize-none outline-none p-4 text-gray-800 placeholder-gray-400 rounded-xl"
           />
           <button
-            onClick={handleSubmit}
+            type="submit"
             disabled={query.trim().length === 0}
             className="bg-gray-900 text-white font-semibold px-6 py-3 rounded-xl mb-2 mr-2
                        hover:bg-gray-700 transition-colors
                        disabled:bg-gray-300 disabled:cursor-not-allowed"
           >
-            Investigate
+            Search Archive
           </button>
-        </div>
+        </form>
 
         {error && (
           <p className="text-red-500 text-sm mt-4">{error}</p>

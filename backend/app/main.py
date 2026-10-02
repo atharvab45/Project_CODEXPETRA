@@ -1,13 +1,19 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from app.services.semantic_search import search_locations
-from app.services.change_detection import compute_change_score
+import csv
+import io
 import os
 import time
 
-app = FastAPI(title="Satellite Change Detection API")
+from fastapi import FastAPI, UploadFile, File, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from app.services.faiss_search import search_rsicd
+from app.services.image_search import search_by_image
+from app.services.discovery import discover_visual_clusters
+from app.services.decisions import save_decision, list_decisions, export_decisions
+
+app = FastAPI(title="ChangeScope Image Search API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,60 +24,107 @@ app.add_middleware(
 )
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
-images_dir = os.path.join(current_dir, "data", "sample_images")
+rsicd_images_dir = os.path.join(current_dir, "data", "rsicd_images")
 
-# Serve the sample_images folder as static files, accessible via /images/...
-app.mount("/images", StaticFiles(directory=images_dir), name="images")
+app.mount("/rsicd-images", StaticFiles(directory=rsicd_images_dir), name="rsicd-images")
+
 
 class InvestigateRequest(BaseModel):
     query: str
+
+
+class DecisionRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    decision: str
+    result: dict
+
 
 @app.get("/")
 def read_root():
     return {"message": "Backend is running"}
 
+
 @app.post("/investigate")
 def investigate(request: InvestigateRequest):
     start_time = time.time()
-
-    matched_locations = search_locations(request.query)
-
-    sample_before = os.path.join(images_dir, "location1_before.png")
-    sample_after = os.path.join(images_dir, "location1_after.png")
+    search_results = search_rsicd(request.query)
 
     results = []
-    for i, loc in enumerate(matched_locations):
+    for loc in search_results:
         result_item = {
             **loc,
-            "coordinates": f"{loc['latitude']}° N, {loc['longitude']}° E",
-            "dateBefore": "Jan 2024",
-            "dateAfter": "Jan 2026",
             "evidence": [
-                "Semantic match based on location description",
-                "Change type inferred from known location metadata",
+                "Caption and image retrieved from the RSICD archive",
+                "Similarity ranking is based on the indexed scene caption",
+                "The archive entry has no verified coordinates or capture date",
             ],
         }
-
-        if i == 0:
-            try:
-                change_result = compute_change_score(sample_before, sample_after)
-                result_item["evidence"].append(
-                    f"Pixel-level change intensity: {change_result['change_percentage']}%"
-                )
-                result_item["changeIntensity"] = change_result["change_percentage"]
-                # Point the frontend to the real images via our new static file route
-                result_item["beforeImage"] = "http://127.0.0.1:8000/images/location1_before.png"
-                result_item["afterImage"] = "http://127.0.0.1:8000/images/location1_after.png"
-            except Exception as e:
-                result_item["evidence"].append("Change detection unavailable for this result")
-
         results.append(result_item)
 
     elapsed_ms = round((time.time() - start_time) * 1000)
-    print(f"Query processed in {elapsed_ms}ms")
+    return {"query": request.query, "results": results, "processingTimeMs": elapsed_ms}
 
-    return {
-        "query": request.query,
-        "results": results,
-        "processingTimeMs": elapsed_ms,
-    }
+
+@app.post("/search-by-image")
+async def search_by_image_endpoint(file: UploadFile = File(...)):
+    start_time = time.time()
+    image_bytes = await file.read()
+
+    search_results = search_by_image(image_bytes)
+
+    results = []
+    for loc in search_results:
+        result_item = {
+            **loc,
+            "evidence": [
+                "Visual similarity match using CLIP embeddings",
+                "Matched against RSICD image archive",
+                "The archive entry has no verified coordinates or capture date",
+            ],
+        }
+        results.append(result_item)
+
+    elapsed_ms = round((time.time() - start_time) * 1000)
+    return {"results": results, "processingTimeMs": elapsed_ms}
+
+
+@app.get("/discover")
+def discover():
+    start_time = time.time()
+    clusters = discover_visual_clusters()
+    elapsed_ms = round((time.time() - start_time) * 1000)
+    return {"clusters": clusters, "processingTimeMs": elapsed_ms}
+
+
+@app.post("/decisions")
+def create_decision(request: DecisionRequest):
+    if request.decision not in {"verified", "dismissed"}:
+        return Response(
+            content='{"detail":"decision must be verified or dismissed"}',
+            status_code=422,
+            media_type="application/json",
+        )
+    return save_decision(request.query, request.decision, request.result)
+
+
+@app.get("/decisions")
+def get_decisions(limit: int = Query(default=100, ge=1, le=1000)):
+    return {"decisions": list_decisions(limit)}
+
+
+@app.get("/decisions/export")
+def download_decisions_csv():
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "id", "result_id", "query", "decision", "location", "confidence",
+        "change_type", "created_at", "result_snapshot",
+    ])
+    for row in export_decisions():
+        writer.writerow(tuple(row))
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="analyst-decisions.csv"'},
+    )
